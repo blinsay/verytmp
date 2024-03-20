@@ -1,0 +1,26 @@
+[package]
+name = "verytmp"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+nix = { version = "0.28", features = [
+    "fs",
+    "mount",
+    "sched",
+    "socket",
+    "process",
+    "uio",
+    "user",
+] }
+bitflags = { version = "*", optional = true }
+libc = { version = "*", optional = true }
+cap-std = { version = "3", optional = true }
+
+[features]
+default = ["dep:bitflags", "dep:libc"]
+cap-std = ["dep:cap-std"]
+
+[dev-dependencies]
+tempfile = "3"
