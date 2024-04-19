@@ -11,7 +11,7 @@ mod test {
     #[test]
     fn test_verytmp_raw() {
         // just test that we can stat the raw fd
-        let fd = unsafe { verytmp::verytmp_raw().unwrap() };
+        let fd = unsafe { verytmp::verytmp_fd().unwrap() };
         nix::sys::stat::fstat(fd.as_raw_fd()).unwrap();
     }
 

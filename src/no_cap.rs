@@ -226,7 +226,8 @@ impl<'a> OpenOptions<'a> {
 
 /// A raw wrapper for openat2.
 ///
-/// TODO: contribute this back to nix
+/// TODO: use the nix implementation once it's released
+/// https://github.com/nix-rust/nix/pull/2339
 fn openat2<P: ?Sized + NixPath>(
     dir: RawFd,
     path: &P,
@@ -283,7 +284,8 @@ macro_rules! libc_bitflags {
     };
 }
 
-// TODO: contribute back to nix, delete
+// TODO: use the nix implementation once it's released
+// https://github.com/nix-rust/nix/pull/2339
 libc_bitflags! {
     pub struct ResovleFlags: libc::c_ulonglong {
         RESOLVE_BENEATH;

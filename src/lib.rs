@@ -19,34 +19,23 @@ use nix::{
     unistd::{self, Gid, Uid},
 };
 
-#[cfg(not(feature = "cap-std"))]
-mod no_cap; // fr fr
-
-#[cfg(not(feature = "cap-std"))]
-pub use no_cap::*;
-
-/// Create a verytmp filesystem and returns the root as a [directory](Dir).
-/// Returns a [Dir] that can
-///
-/// See the module documentation for more information on what a verytmp
-/// filesystem is and how to use it.
-///
-#[cfg(not(feature = "cap-std"))]
-pub fn verytmp() -> io::Result<Dir> {
-    unsafe {
-        let fd = verytmp_raw()?;
-        Ok(fd.into())
+cfg_if::cfg_if! {
+    if #[cfg(not(feature = "cap-std"))] {
+        mod no_cap; // fr fr
+        pub use no_cap::*;
+    } else {
+        use cap_std::fs::Dir;
     }
 }
 
-/// Create a verytmp filesystem. Returns the root as a [directory](cap_std::fs::Dir).
+/// Create a tmpfs. Returns a handle to the root of the filesystem that can
+/// be used to create files and directories.
 ///
-/// See the module documentation for more information on what a verytmp
-/// filesystem is and what it guarantees.
-#[cfg(feature = "cap-std")]
-pub fn verytmp() -> io::Result<cap_std::fs::Dir> {
+/// See the module documentation for more information on verytmp, and see the
+/// `Dir` documentation for examples of how to create files and directories.
+pub fn verytmp() -> io::Result<Dir> {
     unsafe {
-        let fd = verytmp_raw()?;
+        let fd = verytmp_fd()?;
         Ok(fd.into())
     }
 }
@@ -63,8 +52,13 @@ macro_rules! write_file {
     };
 }
 
-// TODO: wrap errors with some context?
-pub unsafe fn verytmp_raw() -> io::Result<OwnedFd> {
+/// Creates a tmps by forking, unsharing to create new mount and user
+/// namespaces, and then mounting a tmpfs somewhere only the child can
+/// access it. The root of the tmpfs is opened and passed back to the
+/// parent process as an open fd.
+///
+/// For usage in rust programs, you should prefer [`verytmp`].
+pub unsafe fn verytmp_fd() -> io::Result<OwnedFd> {
     let (rx, tx) = socket::socketpair(
         AddressFamily::Unix,
         SockType::Stream,
@@ -113,13 +107,12 @@ fn unshare_and_mount(mount_path: &'static str, uid: Uid, gid: Gid) -> nix::Resul
     write_file!("/proc/self/uid_map", "{uid} {uid} 1")?;
     write_file!("/proc/self/gid_map", "{gid} {gid} 1")?;
 
-    // abuse /proc/self as a directory that can be mounted onto. since
-    // this directory only exists in the child and the child is going
-    // to exit asap, there's no real impact.
+    // abuse /proc/self as a directory that can be mounted onto and is only
+    // visible in the child. since this directory only exists in the child
+    // and the child is going to exit asap, there's no real impact.
     //
     // TODO: doing this better requires some syscalls that don't have libc
-    // or nix wrappers yet (fsopen, fsconfig, fsmount). writing raw syscall
-    // wrappers for them is possible - that later.
+    // or nix wrappers yet (fsopen, fsconfig, fsmount).
     mount::mount(
         Some(mount_path),
         "/proc/self/task",

@@ -195,6 +195,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "cap-std",
+ "cfg-if",
  "libc",
  "nix",
  "tempfile",
