@@ -1,29 +1,26 @@
 
-`verytmp` is a crate for creating temporary in-memory filesystems.
+`verytmp` is a linux-only crate for creating temporary in-memory filesystems.
 
 `verytmp` creates a a tmpfs disconnected from the filesystem and returns a
 reference to the root of the new tempfs. Once all file descriptors that
-refer to the tmpfs are cleaned up, the kernel is free to clean up the tmpfs
-and free all the memory it used.
+refer to the tmpfs are cleaned up, the kernel cleans up the tmpfs and frees
+all of the memory it used.
 
 This approach makes `verytmp` different from [`tempfile`] or just throwing
 files in `$TMPDIR`. With `verytmp` there is no userspace cleanup required,
-temporary files are cleaned up even on a `kill -9`, and no wondering when
-was the last time someone cleaned out `/tmp`.
+temporary files are cleaned up even on a `kill -9` and take no disk space.
 
 [`tempfile`]: https://crates.io/crates/tempfile
 
 # Using verytmp
 
 `verytmp` creates a tmpfs and returns the root as a directory struct. Because
-the tmpfs is disconnected from the rest of the filesystem, there's no way to
-specify a plain old path that points into the tmpfs. Instead, directories in
-the tmpfs can create files or directories at subpaths underneath them.
+the tmpfs is disconnected from the rest of the filesystem, there is no way to
+specify a plain old path that points into the tmpfs. Instead, paths have to be
+specified relative to the root of the tempfs or another directory inside of it.
 
 The [verytmp](verytmp) function returns a directory handle to the root
-of the tmpfs that can be used to start creating files and directories. Keep in
-mind that this handle **owns** the root of the filesystem, and will close if you
-drop it.
+of the tmpfs that can be used to start creating files and directories.
 
 ```no_run
 # use std::io::{Read, Seek, SeekFrom, Write};
@@ -49,19 +46,29 @@ assert_eq!("potatoes", &content);
 // memory used for this tmpfs without the program having to do anything else.
 std::mem::drop(my_cool_file);
 ```
+Keep in mind that this handle **owns** the root of the filesystem, and will
+close if you drop it. This doesn't necessarily close the filesystem - as long
+as another file or directory in your `verytmp` fs is open, the kernel will keep
+the entire tempfs alive.
 
 # `cap-std`
 
 [`cap-std`] offers a capability based API for filesystems that is also built
-around accessing files only under a root directory. If you're already using
-`cap-std` in your application, enabling the `cap-std` feature in `verytmp`
-replaces `verytmp::Dir` with `cap_std::fs::Dir`.
+around accessing files only realtive to an existing directory. Enabling the
+`cap-std` feature in `verytmp` replaces `verytmp::Dir` with
+`cap_std::fs::Dir`.
 
 ```no_run
 # #[cfg(feature="cap-std")]
 let fs: cap_std::fs::Dir = verytmp::verytmp().expect("failed to set up tmpfs");
 // more cool code here...
 ```
+
+This is highly recommended if you're already using `cap-std` in your
+application, and provides a more fully-featured filesystem API than `verytmp`'s
+built-in `Dir`.
+
+[`cap-std`]: https://crates.io/crates/cap-std
 
 # Platform support
 
@@ -71,8 +78,6 @@ passing the root directory back to the calling process as a file descriptor.
 
 This is a very linux-specific trick, which means that `verytmp` is currently only
 available on linux.
-
-[`cap-std`]: https://crates.io/crates/cap-std
 
 # Acknolwedgements
 
