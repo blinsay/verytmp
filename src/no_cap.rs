@@ -1,17 +1,14 @@
 use std::{
     fs::File,
     io,
-    mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     path::Path,
-    ptr::addr_of_mut,
 };
 
 use nix::{
     errno::Errno,
-    fcntl::OFlag,
+    fcntl::{self, OFlag, OpenHow, ResolveFlag},
     sys::stat::{self, Mode},
-    NixPath,
 };
 
 pub struct Dir {
@@ -102,74 +99,6 @@ pub struct OpenOptions<'a> {
     mode: u32,
 }
 
-#[allow(unused)]
-impl<'a> OpenOptions<'a> {
-    pub fn append(&mut self, append: bool) -> &mut Self {
-        self.append = append;
-        self
-    }
-
-    pub fn create(&mut self, create: bool) -> &mut Self {
-        self.create = create;
-        self
-    }
-
-    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.create_new = create_new;
-        self
-    }
-
-    pub fn read(&mut self, read: bool) -> &mut Self {
-        self.read = read;
-        self
-    }
-
-    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.truncate = truncate;
-        self
-    }
-
-    pub fn write(&mut self, write: bool) -> &mut Self {
-        self.write = write;
-        self
-    }
-
-    pub fn flags(&mut self, flags: i32) -> &mut Self {
-        self.flags = flags;
-        self
-    }
-
-    pub fn mode(&mut self, mode: u32) -> &mut Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn open<P: AsRef<Path>>(&mut self, p: P) -> io::Result<File> {
-        let oflags = OFlag::O_CLOEXEC | self.access_flags()? | self.create_flags()?;
-        let mode = Mode::from_bits_truncate(self.mode);
-
-        let fd = openat2(
-            self.fs.root.as_raw_fd(),
-            p.as_ref(),
-            oflags,
-            mode,
-            ResovleFlags::RESOLVE_BENEATH | ResovleFlags::RESOLVE_NO_MAGICLINKS,
-        )
-        .map_err(openat_err)?;
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-}
-
-fn openat_err(e: Errno) -> io::Error {
-    match e {
-        Errno::EXDEV => io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "can't open a file outside of the current root directory",
-        ),
-        e => e.into(),
-    }
-}
-
 // idea and impls here are borrowed from stdlib. this is potentially not the
 // way you might choose to implement this on your own, but it's the one here
 // because it's consistent with stdlib and easy to check for behavior
@@ -222,162 +151,176 @@ impl<'a> OpenOptions<'a> {
         };
         Ok(oflag)
     }
-}
 
-/// A raw wrapper for openat2.
-///
-/// TODO: use the nix implementation once it's released
-/// https://github.com/nix-rust/nix/pull/2339
-fn openat2<P: ?Sized + NixPath>(
-    dir: RawFd,
-    path: &P,
-    oflag: OFlag,
-    mode: Mode,
-    resolve: ResovleFlags,
-) -> nix::Result<RawFd> {
-    let mut how = unsafe {
-        let mut how: MaybeUninit<libc::open_how> = MaybeUninit::uninit();
-        let ptr = how.as_mut_ptr();
-        addr_of_mut!((*ptr).flags).write(oflag.bits() as libc::c_ulonglong);
-        addr_of_mut!((*ptr).mode).write(mode.bits() as libc::c_ulonglong);
-        addr_of_mut!((*ptr).resolve).write(resolve.bits());
-        how.assume_init()
-    };
-
-    let fd = path.with_nix_path(|cstr| unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            dir,
-            cstr.as_ptr(),
-            &mut how as *mut _,
-            std::mem::size_of::<libc::open_how>(),
-        )
-    })?;
-    Errno::result(fd as i32)
-}
-
-// This macro is copied directly from nix to support openat2. Merge that upstream
-// and delete this ASAP.
-//
-// https://github.com/nix-rust/nix/blob/c6a7d402d9eabf21f2edea28aa4839617e9d5478/src/macros.rs#L55C1-L78C1
-macro_rules! libc_bitflags {
-    (
-        $(#[$outer:meta])*
-        pub struct $BitFlags:ident: $T:ty {
-            $(
-                $(#[$inner:ident $($args:tt)*])*
-                $Flag:ident $(as $cast:ty)*;
-            )+
+    fn create_mode(&self) -> Mode {
+        if self.create || self.create_new {
+            Mode::from_bits_truncate(self.mode)
+        } else {
+            Mode::empty()
         }
-    ) => {
-        ::bitflags::bitflags! {
-            #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-            #[repr(transparent)]
-            $(#[$outer])*
-            pub struct $BitFlags: $T {
-                $(
-                    $(#[$inner $($args)*])*
-                    const $Flag = libc::$Flag $(as $cast)*;
-                )+
-            }
-        }
-    };
-}
-
-// TODO: use the nix implementation once it's released
-// https://github.com/nix-rust/nix/pull/2339
-libc_bitflags! {
-    pub struct ResovleFlags: libc::c_ulonglong {
-        RESOLVE_BENEATH;
-        RESOLVE_NO_MAGICLINKS;
     }
 }
 
-#[cfg(test)]
-mod openat_test {
-    use std::io::{Read, Seek, Write};
-
-    use super::*;
-    use nix::{fcntl::OFlag, sys::stat::Mode};
-
-    #[test]
-    fn test_openat2() {
-        let tmpdir = tempfile::tempdir().unwrap();
-
-        let dir_fd = nix::fcntl::open(
-            tmpdir.path(),
-            OFlag::O_DIRECTORY | OFlag::O_RDONLY,
-            Mode::empty(),
-        )
-        .unwrap();
-
-        let new_file = openat2(
-            dir_fd,
-            "potato.txt",
-            OFlag::O_CREAT | OFlag::O_RDWR,
-            Mode::S_IWUSR | Mode::S_IRUSR,
-            ResovleFlags::RESOLVE_BENEATH | ResovleFlags::RESOLVE_NO_MAGICLINKS,
-        )
-        .expect("openat2");
-
-        let mut file = unsafe { File::from_raw_fd(new_file) };
-        file.write_all(b"hello from openat2").unwrap();
-        file.seek(io::SeekFrom::Start(0)).unwrap();
-
-        let mut content = String::with_capacity(32);
-        file.read_to_string(&mut content).unwrap();
-
-        assert_eq!("hello from openat2", &content[..]);
+#[allow(unused)]
+impl<'a> OpenOptions<'a> {
+    pub fn append(&mut self, append: bool) -> &mut Self {
+        self.append = append;
+        self
     }
 
-    #[test]
-    fn test_openat2_resolve_beneath() {
-        let tmpdir = tempfile::tempdir().unwrap();
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.create = create;
+        self
+    }
 
-        let dir_fd = nix::fcntl::open(
-            tmpdir.path(),
-            OFlag::O_DIRECTORY | OFlag::O_RDONLY,
-            Mode::empty(),
-        )
-        .unwrap();
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new = create_new;
+        self
+    }
 
-        let res = openat2(
-            dir_fd,
-            "../../test_dir",
-            OFlag::O_CREAT | OFlag::O_RDWR,
-            Mode::S_IWUSR | Mode::S_IRUSR,
-            ResovleFlags::RESOLVE_BENEATH,
-        );
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.read = read;
+        self
+    }
 
-        // from man openat(2):
-        //
-        // RETURNS:
-        //      EXDEV   how.resolve  contains either RESOLVE_IN_ROOT or
-        //      RESOLVE_BENEATH, and an escape from the root during path
-        //      resolution was detected.
-        assert_eq!(Err(Errno::EXDEV), res);
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.truncate = truncate;
+        self
+    }
+
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.write = write;
+        self
+    }
+
+    pub fn flags(&mut self, flags: i32) -> &mut Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn mode(&mut self, mode: u32) -> &mut Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn open<P: AsRef<Path>>(&mut self, path: P) -> io::Result<File> {
+        let fd = self.fs.root.as_raw_fd();
+        let path = path.as_ref();
+        let how = OpenHow::new()
+            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_MAGICLINKS)
+            .mode(self.create_mode())
+            .flags(OFlag::O_CLOEXEC | self.access_flags()? | self.create_flags()?);
+
+        dbg! { (fd, path, how) };
+
+        let fd = fcntl::openat2(fd, path, how).map_err(openat_err)?;
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+fn openat_err(e: Errno) -> io::Error {
+    match e {
+        Errno::EXDEV => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "can't open a file outside of the current root directory",
+        ),
+        e => e.into(),
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::{
+        io::{Read, Seek, Write},
+        os::unix::fs::OpenOptionsExt,
+    };
+
+    use super::*;
+
     #[test]
     fn test_dir_create() {
-        unimplemented!("test me")
+        let temp_root = tempfile::tempdir().expect("root tempfile");
+        let dir = Dir::from(open_dir(temp_root.path()).expect("dir fd"));
+
+        let mut f = dir.create("an_file.txt").expect("create failed");
+        f.write_all(b"some data").unwrap();
+        assert_eq!(
+            std::fs::read(temp_root.path().join("an_file.txt")).unwrap(),
+            b"some data",
+        );
     }
 
     #[test]
     fn test_dir_create_dir() {
-        unimplemented!("test me")
+        let temp_root = tempfile::tempdir().expect("root tempfile");
+        let dir = Dir::from(open_dir(temp_root.path()).expect("dir fd"));
+
+        dir.create_dir("foo").expect("create dir failed");
+
+        let foo_md = std::fs::symlink_metadata(temp_root.path().join("foo")).unwrap();
+        assert!(foo_md.is_dir(), "should be a directory");
+    }
+
+    #[test]
+    fn test_read_write_in_dir() {
+        let temp_root = tempfile::tempdir().expect("root tempfile");
+        let dir = Dir::from(open_dir(temp_root.path()).expect("dir fd"));
+
+        dir.create_dir("foo").expect("create dir failed");
+        let mut f = dir
+            .create("foo/bar.txt")
+            .expect("creating a file inside a dir");
+        f.write_all(b"kilroy was here").unwrap();
+
+        let mut content = String::with_capacity(32);
+        dir.open("foo/bar.txt")
+            .expect("opening a file inside a dir failed")
+            .read_to_string(&mut content)
+            .expect("failed to read kilroy");
+        assert_eq!("kilroy was here", &content);
     }
 
     #[test]
     fn test_create_not_beneath() {
-        unimplemented!("test me")
+        let temp_root = tempfile::tempdir().expect("root tempfile");
+        let dir = Dir::from(open_dir(temp_root.path()).expect("dir fd"));
+
+        dir.create_dir("foo").expect("create dir failed");
+        dir.create_dir("foo/bar").expect("create nested dir failed");
+
+        let err = dir
+            .open("foo/bar/../../../../etc/passwd")
+            .expect_err("should have been an error");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
     fn test_create_builder() {
-        unimplemented!("test me")
+        let temp_root = tempfile::tempdir().expect("root tempfile");
+        let dir = Dir::from(open_dir(temp_root.path()).expect("dir fd"));
+
+        dir.create_dir("foo").expect("create dir failed");
+        let mut bar = dir
+            .file()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open("foo/bar.txt")
+            .expect("create failed");
+
+        bar.write_all(b"kilroy was here").expect("write failed");
+        bar.seek(io::SeekFrom::Start(0)).expect("seek failed");
+
+        let mut content = String::with_capacity(32);
+        bar.read_to_string(&mut content).expect("read failed");
+        assert_eq!("kilroy was here", &content);
+    }
+
+    fn open_dir<P: AsRef<Path>>(path: P) -> std::io::Result<OwnedFd> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .mode(libc::O_DIRECTORY as u32)
+            .open(path)
+            .map(|f| f.into())
     }
 }

@@ -6,7 +6,9 @@ edition = "2021"
 
 [dependencies]
 cfg-if = "1.0"
-nix = { version = "0.28", features = [
+# TODO: update this once nix does a release. this can be any rev that includes
+# https://github.com/nix-rust/nix/pull/2339
+nix = { git = "https://github.com/nix-rust/nix.git", rev = "1c2cad8bdff511133e87c2feb4a193bc351a46f5", features = [
     "fs",
     "mount",
     "sched",
