@@ -11,6 +11,18 @@ use nix::{
     sys::stat::{self, Mode},
 };
 
+/// A handle to an open directory.
+///
+/// Directory handles create or open files and directories. A directory handle
+/// only has access to child files or directories - attempting to create or open
+/// a file outside of this directory is an error.
+///
+/// While the this API resembles a capability based filesystem API, it's used
+/// here for convenience and not security. Because a verytmp tmpfs exists
+/// in its own detached filesystem, there is no way to specify a path into
+/// the filesystem that isn't relative to the root file descriptor! Both [Dir]
+/// and [std::fs::File] do both implment [IntoRawFd] as an escape hatch for
+/// advanced use, which allows a caller to escape the capability-style API.
 pub struct Dir {
     // NOTE: because of the way verytmp works, there's no cleanup necessary. if
     // there was a reason to close the root fd, this could be an OwnedFd but
@@ -27,27 +39,49 @@ impl From<OwnedFd> for Dir {
 
 #[allow(unused)]
 impl Dir {
+    /// Return a builder for creating or opening a child directory. See
+    /// [DirOptions] for example usage.
     pub fn dir<'a>(&'a self) -> DirOptions<'a> {
         DirOptions::new_default(self)
     }
 
+    /// Create a child directory at a subpath.
+    ///
+    /// To customize the directory mode on creation, use the [`Dir::dir`] method.
+    /// See [`DirOptions`] for details.
     pub fn create_dir<P: AsRef<Path>>(&self, p: P) -> io::Result<()> {
         self.dir().create(p)
     }
 
+    /// Return a builder for creating or opening a file in this directory or
+    /// in one of its children.
+    ///
+    /// See [OpenOptions] for an example.
     pub fn file<'a>(&'a self) -> OpenOptions<'a> {
         OpenOptions::new_default(self)
     }
 
+    /// Open a new file for writing.
+    ///
+    /// The file will be created if it does not exist, and will be truncated
+    /// if it does.
+    ///
+    /// To specify creation mode or open flags, use the [Dir::file] method.
+    /// See [`OpenOptions`] for details.
     pub fn create<P: AsRef<Path>>(&self, p: P) -> io::Result<File> {
         self.file().write(true).create(true).truncate(true).open(p)
     }
 
+    /// Open a new file in read-only mode.
+    ///
+    /// To specify creation mode or open flags, use the [Dir::file] method.
+    /// See [`OpenOptions`] for details.
     pub fn open<P: AsRef<Path>>(&self, p: P) -> io::Result<File> {
         self.file().read(true).open(p)
     }
 }
 
+#[doc(hidden)]
 impl AsRawFd for Dir {
     fn as_raw_fd(&self) -> RawFd {
         self.root.as_raw_fd()
@@ -60,6 +94,36 @@ impl IntoRawFd for Dir {
     }
 }
 
+/// Options and flags for opening directories.
+///
+/// This is the directory-level equivalent of [OpenOptions] and should have an
+/// API similar to that of [std::fs::DirBuilder] and
+/// [std::os::unix::fs::DirBuilderExt].
+///
+/// Like [OpenOptions], the only way to obtain a [DirOptions] is through an
+/// existing directory.
+///
+/// # Note
+///
+/// This crate currently doesn't implement an equivalent of
+/// [`std::fs::create_dir_all`]. Sorry about that!
+///
+/// # Examples
+///
+/// Create a directory with a custom mode:
+///
+/// ```no_run
+/// use verytmp;
+///
+/// let dir = verytmp::verytmp()?;
+///
+/// let file = dir.dir()
+///     .mode(0o765)
+///     .create("foo");
+///
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
 #[derive(Clone)]
 pub struct DirOptions<'a> {
     fs: &'a Dir,
@@ -74,11 +138,14 @@ impl<'a> DirOptions<'a> {
 
 #[allow(unused)]
 impl<'a> DirOptions<'a> {
+    /// Set the unix mode of a newly create directory.
     pub fn mode(&mut self, mode: u32) -> &mut Self {
         self.mode = mode;
         self
     }
 
+    /// Create a new directory as a child of an existing directory.
+    ///
     pub fn create<P: AsRef<Path>>(&mut self, p: P) -> io::Result<()> {
         let mode = Mode::from_bits_truncate(self.mode);
         stat::mkdirat(Some(self.fs.root.as_raw_fd()), p.as_ref(), mode)?;
@@ -86,6 +153,45 @@ impl<'a> DirOptions<'a> {
     }
 }
 
+/// Options and flags that configure how a file is opened.
+///
+/// `OpenOptions` is intended to mirror [std::fs::OpenOptions] as closely as
+/// possible and should be API compatible where possible.
+///
+/// Unlike the standard library, there is no way to create a stand-alone set of
+/// `OpenOptions` options - every `OpenOptions` is tied to the directory tree
+/// where it's allowed to create files, and has to be obtained from the [Dir::file]
+/// method.
+///
+/// # Examples
+///
+/// ```no_run
+/// use verytmp;
+///
+/// let dir = verytmp::verytmp()?;
+///
+/// let file = dir.file()
+///     .create_new(true)
+///     .read(true)
+///     .write(true)
+///     .open("foo.txt");
+///
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// Opening a file read only:
+///
+/// ```no_run
+/// use verytmp;
+///
+/// let dir = verytmp::verytmp()?;
+///
+/// let file = dir.file()
+///     .read(true)
+///     .open("foo.txt");
+///
+/// # Ok::<(), std::io::Error>(())
+/// ```
 #[derive(Clone)]
 pub struct OpenOptions<'a> {
     fs: &'a Dir,
@@ -163,46 +269,82 @@ impl<'a> OpenOptions<'a> {
 
 #[allow(unused)]
 impl<'a> OpenOptions<'a> {
+    /// Sets the option for append mode.
+    ///
+    /// When set, the opened file will be append too instead of overwritten.
+    /// Note that settings `.write(true).append(true)` has the same effect
+    /// as `.append(true)`.
     pub fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
+    /// Sets the option to create a new file if the file does not already
+    /// exist. For a file to be created, `.write(true)` or `.append(true)` must
+    /// be set as well.
+    ///
+    /// See [OpenOptions::create_new] if you'd like to only create if it does
+    /// not already exist.
     pub fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
+    /// Set the option to create a new file if and only if it doesn't already
+    /// exist. The file must also be opened with `.write(true)` or
+    /// `.append(true)`.
+    ///
+    /// Setting this option to true ignores the `create` and `truncate` options.
+    ///
+    /// See [OpenOptions::create_new] to create or overwrite an existing file.
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
     }
 
+    /// Sets the option to open a file for reading.
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
+    /// Sets the option to truncate a file on opening.
     pub fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
+    /// Sets the option to open a file writing.
+    ///
+    /// To truncate a file when writing, use `.truncate(true)`.
     pub fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
+    /// Set open flags that will be directly passed to `openat2` when this file
+    /// is opened.
+    ///
+    /// These flags are merged with any flags set by setting other options on
+    /// this `OpenOptions`.
     pub fn flags(&mut self, flags: i32) -> &mut Self {
         self.flags = flags;
         self
     }
 
+    /// Set the mode a new file will be created with.
+    ///
+    /// It's an error to set mode to a non-zero value if a file is not opened
+    /// with `.create(true)` set or the `O_CREAT` flag passed to `flags`.
     pub fn mode(&mut self, mode: u32) -> &mut Self {
         self.mode = mode;
         self
     }
 
+    /// Open the file at `path` with all of the currently configured options on
+    /// `self`.
+    ///
+    /// `path` must be a path relative to the directory associated with `self`.
     pub fn open<P: AsRef<Path>>(&mut self, path: P) -> io::Result<File> {
         let fd = self.fs.root.as_raw_fd();
         let path = path.as_ref();
